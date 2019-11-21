@@ -1,7 +1,6 @@
 #include <windows.h>
 #include <iostream>
 
-#include "t1ha/t1ha.h"
 #include "api_obf/api_obfuscation.hpp"
 
 int main()
