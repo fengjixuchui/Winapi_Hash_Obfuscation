@@ -51,9 +51,6 @@
     <ClCompile Include="t1ha\src\t1ha2_selfcheck.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="api_obf\hash_work.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="t1ha\t1ha.h">
@@ -71,13 +68,10 @@
     <ClInclude Include="t1ha\src\t1ha0_ia32aes_b.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="api_obf\export_work.hpp">
+    <ClInclude Include="hide_str.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="api_obf\hash_work.hpp">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="api_obf\PointerHashFunc.hpp">
+    <ClInclude Include="api_obf\api_obfuscation.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

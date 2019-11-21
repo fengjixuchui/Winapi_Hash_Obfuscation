@@ -1,14 +1,587 @@
-﻿// Super Hide String
+﻿#pragma once
 #include "../hide_str.hpp"
-
 #include "../t1ha/t1ha.h"
-#include "PointerHashFunc.hpp"
+
+#include <string>
+#include <TlHelp32.h>
+#include <Windows.h>
+#include <winnt.h>
+#include <winternl.h>
 
 #define STRONG_SEED 10376313370251892926
+#define RAND_DWORD1		0x03EC7B5E
+#define ROR(x,n) (((x) >> (n)) | ((x) << (32-(n))))
 
-#include "export_work.hpp"
-#include <string>
+// -----------------
+#pragma region Export Work
+struct LDR_MODULE
+{
+  LIST_ENTRY e[3];
+  HMODULE base;
+  void *entry;
+  UINT size;
+  UNICODE_STRING dllPath;
+  UNICODE_STRING dllname;
+};
 
+typedef struct _PEB_LDR_DATA_
+{
+  BYTE Reserved1[8];
+  PVOID Reserved2[3];
+  LIST_ENTRY *InMemoryOrderModuleList;
+} PEB_LDR_DATA_, * PPEB_LDR_DATA_;
+
+#ifdef _WIN64
+typedef struct _PEB_c
+{
+  BYTE Reserved1[2];
+  BYTE BeingDebugged;
+  BYTE Reserved2[21];
+  PPEB_LDR_DATA_ Ldr;
+} PEB_c;
+#else
+typedef struct _PEB_c
+{
+  /*0x000*/     UINT8        InheritedAddressSpace;
+  /*0x001*/     UINT8        ReadImageFileExecOptions;
+  /*0x002*/     UINT8        BeingDebugged;
+  /*0x003*/     UINT8        SpareBool;
+  /*0x004*/     VOID *Mutant;
+  /*0x008*/     VOID *ImageBaseAddress;
+  /*0x00C*/     struct _PEB_LDR_DATA *Ldr;
+  /*.....*/
+} PEB_c;
+#endif
+
+#pragma warning (disable : 4996)
+__forceinline const wchar_t *char_to_wchar(const char *c)
+{
+  const size_t cSize = strlen(c) + 1;
+  wchar_t *wc = new wchar_t[cSize];
+  mbstowcs(wc, c, cSize);
+  return wc;
+}
+
+static HMODULE(WINAPI *temp_LoadLibraryA)(__in LPCSTR file_name) = nullptr;
+static int (*temp_lstrcmpiW)(LPCWSTR lpString1, LPCWSTR lpString2) = nullptr;
+
+static __forceinline HMODULE hash_LoadLibraryA(__in LPCSTR file_name)
+{
+  return temp_LoadLibraryA(file_name);
+}
+
+static __forceinline int hash_lstrcmpiW(LPCWSTR lpString1,
+                                        LPCWSTR lpString2)
+{
+  return temp_lstrcmpiW(lpString1,
+                        lpString2);
+}
+
+__forceinline HMODULE kernel32Handle(void)
+{
+  HMODULE dwResult = NULL;
+  PEB_c *lpPEB = NULL;
+  SIZE_T *lpFirstModule = NULL;
+#if defined _WIN64
+  lpPEB = *(PEB_c **)(__readgsqword(0x30) + 0x60); //get a pointer to the PEB
+#else
+  lpPEB = *(PEB_c **)(__readfsdword(0x18) + 0x30); //get a pointer to the PEB
+#endif
+  // PEB->Ldr->LdrInMemoryOrderModuleList
+  // PEB->Ldr = 0x0C
+  // Ldr->LdrInMemoryOrderModuleList = 0x14
+  lpFirstModule = (SIZE_T *)lpPEB->Ldr->InMemoryOrderModuleList;
+  SIZE_T *lpCurrModule = lpFirstModule;
+  do
+  {
+    PWCHAR szwModuleName = (PWCHAR)lpCurrModule[10]; // 0x28 - module name in unicode
+    DWORD i = 0;
+    DWORD dwHash = 0;
+    while (szwModuleName[i])
+    {
+      BYTE zByte = (BYTE)szwModuleName[i];
+      if (zByte >= 'a' && zByte <= 'z')
+        zByte -= 0x20; // Uppercase
+      dwHash = ROR(dwHash, 13) + zByte;
+      i++;
+    }
+    if ((dwHash ^ RAND_DWORD1) == (0x6E2BCA17 ^ RAND_DWORD1)) // KERNEL32.DLL hash
+    {
+      dwResult = (HMODULE)lpCurrModule[4];
+      return dwResult;
+    }
+    lpCurrModule = (SIZE_T *)lpCurrModule[0]; // next module in linked list
+  } while (lpFirstModule != (SIZE_T *)lpCurrModule[0]);
+  return dwResult;
+}
+
+__forceinline LPVOID parse_export_table(HMODULE module, uint64_t api_hash, uint64_t len, const uint64_t seed)
+{
+  PIMAGE_DOS_HEADER img_dos_header;
+  PIMAGE_NT_HEADERS img_nt_header;
+  PIMAGE_EXPORT_DIRECTORY in_export;
+  img_dos_header = (PIMAGE_DOS_HEADER)module;
+  img_nt_header = (PIMAGE_NT_HEADERS)((DWORD_PTR)img_dos_header + img_dos_header->e_lfanew);
+  in_export = (PIMAGE_EXPORT_DIRECTORY)((DWORD_PTR)img_dos_header + img_nt_header->OptionalHeader.DataDirectory[
+                                         IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
+  PDWORD rva_name;
+  PWORD rva_ordinal;
+  rva_name = (PDWORD)((DWORD_PTR)img_dos_header + in_export->AddressOfNames);
+  rva_ordinal = (PWORD)((DWORD_PTR)img_dos_header + in_export->AddressOfNameOrdinals);
+  UINT ord = -1;
+  char *api_name;
+  unsigned int i;
+  for (i = 0; i < in_export->NumberOfNames - 1; i++)
+  {
+    api_name = (PCHAR)((DWORD_PTR)img_dos_header + rva_name[i]);
+    const uint64_t get_hash = t1ha0(api_name, len, seed);
+    if (api_hash == get_hash)
+    {
+      ord = static_cast<UINT>(rva_ordinal[i]);
+      break;
+    }
+  }
+  const auto func_addr = (PDWORD)((DWORD_PTR)img_dos_header + in_export->AddressOfFunctions);
+  const auto func_find = (LPVOID)((DWORD_PTR)img_dos_header + func_addr[ord]);
+  return func_find;
+}
+
+
+__forceinline LPVOID get_api(uint64_t api_hash, LPCSTR module, uint64_t len, const uint64_t seed)
+{
+  HMODULE krnl32, hDll;
+  LPVOID api_func;
+#ifdef _WIN64
+  const auto ModuleList = 0x18;
+  const auto ModuleListFlink = 0x18;
+  const auto KernelBaseAddr = 0x10;
+  const INT_PTR peb = __readgsqword(0x60);
+#else
+  int ModuleList = 0x0C;
+  int ModuleListFlink = 0x10;
+  int KernelBaseAddr = 0x10;
+  INT_PTR peb = __readfsdword(0x30);
+#endif
+  const auto mdllist = *(INT_PTR *)(peb + ModuleList);
+  const auto mlink = *(INT_PTR *)(mdllist + ModuleListFlink);
+  auto krnbase = *(INT_PTR *)(mlink + KernelBaseAddr);
+  auto mdl = (LDR_MODULE *)mlink;
+  HMODULE hKernel32 = NULL;
+  hKernel32 = kernel32Handle();
+  const char *lstrcmpiW_ = (LPCSTR)PRINT_HIDE_STR("lstrcmpiW");
+  const uint64_t api_hash_lstrcmpiW = t1ha0(lstrcmpiW_, strlen(lstrcmpiW_), STRONG_SEED);
+  temp_lstrcmpiW = static_cast<int(*)(LPCWSTR, LPCWSTR)>(parse_export_table(
+                     hKernel32, api_hash_lstrcmpiW, strlen(lstrcmpiW_), STRONG_SEED));
+  do
+  {
+    mdl = (LDR_MODULE *)mdl->e[0].Flink;
+    if (mdl->base != nullptr)
+    {
+      if (!hash_lstrcmpiW(mdl->dllname.Buffer, char_to_wchar((LPCSTR)PRINT_HIDE_STR("kernel32.dll"))))
+      {
+        break;
+      }
+    }
+  } while (mlink != (INT_PTR)mdl);
+  krnl32 = static_cast<HMODULE>(mdl->base);
+  const char *LoadLibraryA_ = (LPCSTR)PRINT_HIDE_STR("LoadLibraryA");
+  const uint64_t api_hash_LoadLibraryA = t1ha0(LoadLibraryA_, strlen(LoadLibraryA_), STRONG_SEED);
+  temp_LoadLibraryA = static_cast<HMODULE(WINAPI *)(LPCSTR)>(parse_export_table(
+                        krnl32, api_hash_LoadLibraryA, strlen(LoadLibraryA_), STRONG_SEED));
+  hDll = hash_LoadLibraryA(module);
+  api_func = static_cast<LPVOID>(parse_export_table(hDll, api_hash, len, seed));
+  return api_func;
+}
+#pragma endregion Export Work
+
+// -----------------
+#pragma region Pointer Hash Functions
+HANDLE(WINAPI *temp_CreateFile)(__in LPCSTR file_name,
+                                __in DWORD access,
+                                __in DWORD share,
+                                __in LPSECURITY_ATTRIBUTES security,
+                                __in DWORD creation_disposition,
+                                __in DWORD flags,
+                                __in HANDLE template_file) = nullptr;
+
+BOOL(WINAPI *temp_VirtualProtect)(LPVOID lpAddress,
+                                  SIZE_T dwSize,
+                                  DWORD flNewProtect,
+                                  PDWORD lpflOldProtect) = nullptr;
+
+LPVOID(WINAPI *temp_VirtualAlloc)(LPVOID lpAddress,
+                                  SIZE_T dwSize,
+                                  DWORD flAllocationType,
+                                  DWORD flProtect) = nullptr;
+
+BOOL(WINAPI *temp_VirtualFree)(LPVOID lpAddress,
+                               SIZE_T dwSize,
+                               DWORD dwFreeType) = nullptr;
+
+LPVOID(WINAPI *temp_VirtualAllocEx)(HANDLE hProcess,
+                                    LPVOID lpAddress,
+                                    SIZE_T dwSize,
+                                    DWORD flAllocationType,
+                                    DWORD flProtect) = nullptr;
+
+BOOL(WINAPI *temp_VirtualFreeEx)(HANDLE hProcess,
+                                 LPVOID lpAddress,
+                                 SIZE_T dwSize,
+                                 DWORD dwFreeType) = nullptr;
+
+
+DWORD(WINAPI *temp_QueryDosDeviceW)(LPCWSTR lpDeviceName,
+                                    LPWSTR lpTargetPath,
+                                    DWORD ucchMax) = nullptr;
+
+BOOL(WINAPI *temp_GetDiskFreeSpaceExW)(LPCWSTR lpDirectoryName,
+                                       PULARGE_INTEGER lpFreeBytesAvailableToCaller,
+                                       PULARGE_INTEGER lpTotalNumberOfBytes,
+                                       PULARGE_INTEGER lpTotalNumberOfFreeBytes) = nullptr;
+
+HMODULE(WINAPI *temp_LoadLibraryW)(LPCWSTR lpLibFileName) = nullptr;
+
+BOOL(WINAPI *temp_GetModuleHandleExW)(DWORD dwFlags,
+                                      LPCWSTR lpModuleName,
+                                      HMODULE *phModule) = nullptr;
+
+DWORD(WINAPI *temp_GetModuleFileNameW)(HMODULE hModule,
+                                       LPWSTR lpFilename,
+                                       DWORD nSize) = nullptr;
+
+HMODULE(WINAPI *temp_GetModuleHandleA)(LPCSTR lpModuleName) = nullptr;
+
+FARPROC(WINAPI *temp_GetProcAddress)(HMODULE hModule,
+                                     LPCSTR lpProcName) = nullptr;
+
+HMODULE(WINAPI *temp_GetModuleHandleW)(LPCWSTR lpModuleName) = nullptr;
+
+HANDLE(WINAPI *temp_GetCurrentThread)() = nullptr;
+
+HANDLE(WINAPI *temp_GetStdHandle)(_In_ DWORD nStdHandle) = nullptr;
+
+BOOL(WINAPI *temp_GetConsoleScreenBufferInfo)(_In_ HANDLE hConsoleOutput,
+    _Out_ PCONSOLE_SCREEN_BUFFER_INFO lpConsoleScreenBufferInfo) = nullptr;
+
+BOOL(WINAPI *temp_SetConsoleTextAttribute)(_In_ HANDLE hConsoleOutput,
+    _In_ WORD wAttributes) = nullptr;
+
+DWORD(WINAPI *temp_GetTickCount)() = nullptr;
+
+BOOL(WINAPI *temp_VerifyVersionInfoW)(LPOSVERSIONINFOEXA lpVersionInformation,
+                                      DWORD dwTypeMask,
+                                      DWORDLONG dwlConditionMask) = nullptr;
+
+UINT(WINAPI *temp_GetSystemWindowsDirectoryW)(LPWSTR lpBuffer,
+    UINT uSize) = nullptr;
+
+UINT(WINAPI *temp_GetWindowsDirectoryW)(LPWSTR lpBuffer,
+                                        UINT uSize) = nullptr;
+
+UINT(WINAPI *temp_GetSystemDirectoryW)(LPWSTR lpBuffer,
+                                       UINT uSize) = nullptr;
+
+UINT(WINAPI *temp_GetSystemDirectoryA)(LPSTR lpBuffer,
+                                       UINT uSize) = nullptr;
+
+void (WINAPI *temp_GetSystemInfo)(LPSYSTEM_INFO lpSystemInfo) = nullptr;
+
+DWORD(WINAPI *temp_ExpandEnvironmentStringsW)(LPCWSTR lpSrc,
+    LPWSTR lpDst,
+    DWORD nSize) = nullptr;
+
+BOOL(WINAPI *temp_QueryPerformanceCounter)(LARGE_INTEGER *lpPerformanceCount) = nullptr;
+
+BOOL(WINAPI *temp_IsProcessorFeaturePresent)(DWORD ProcessorFeature) = nullptr;
+
+PVOID(WINAPI *temp_AddVectoredExceptionHandler)(ULONG First, PVECTORED_EXCEPTION_HANDLER Handler) = nullptr;
+
+void (WINAPI *temp_SetLastError)(DWORD dwErrCode) = nullptr;
+
+_Post_equals_last_error_ DWORD(WINAPI *temp_GetLastError)() = nullptr;
+
+void (WINAPI *temp_OutputDebugStringW)(LPCWSTR lpOutputString) = nullptr;
+
+DWORD(WINAPI *temp_FormatMessageW)(DWORD dwFlags,
+                                   LPCVOID lpSource,
+                                   DWORD dwMessageId,
+                                   DWORD dwLanguageId,
+                                   LPWSTR lpBuffer,
+                                   DWORD nSize,
+                                   va_list *Arguments) = nullptr;
+
+HANDLE(WINAPI *temp_CreateMutexW)(LPSECURITY_ATTRIBUTES lpMutexAttributes,
+                                  BOOL bInitialOwner,
+                                  LPCWSTR lpName) = nullptr;
+
+HANDLE(WINAPI *temp_CreateEventW)(LPSECURITY_ATTRIBUTES lpEventAttributes,
+                                  BOOL bManualReset,
+                                  BOOL bInitialState,
+                                  LPCWSTR lpName) = nullptr;
+
+BOOL(WINAPI *temp_SetEvent)(HANDLE hEvent) = nullptr;
+
+DWORD(WINAPI *temp_WaitForSingleObject)(HANDLE hHandle,
+                                        DWORD dwMilliseconds) = nullptr;
+
+DWORD(WINAPI *temp_QueueUserAPC)(PAPCFUNC pfnAPC,
+                                 HANDLE hThread,
+                                 ULONG_PTR dwData) = nullptr;
+
+HANDLE(WINAPI *temp_CreateThread)(LPSECURITY_ATTRIBUTES lpThreadAttributes,
+                                  SIZE_T dwStackSize,
+                                  LPTHREAD_START_ROUTINE lpStartAddress,
+                                  __drv_aliasesMem LPVOID lpParameter,
+                                  DWORD dwCreationFlags,
+                                  LPDWORD lpThreadId) = nullptr;
+
+HANDLE(WINAPI *temp_CreateWaitableTimerW)(LPSECURITY_ATTRIBUTES lpTimerAttributes,
+    BOOL bManualReset,
+    LPCWSTR lpTimerName) = nullptr;
+
+BOOL(WINAPI *temp_SetWaitableTimer)(HANDLE hTimer,
+                                    const LARGE_INTEGER *lpDueTime,
+                                    LONG lPeriod,
+                                    PTIMERAPCROUTINE pfnCompletionRoutine,
+                                    LPVOID lpArgToCompletionRoutine,
+                                    BOOL fResume) = nullptr;
+
+BOOL(WINAPI *temp_CancelWaitableTimer)(HANDLE hTimer) = nullptr;
+
+BOOL(WINAPI *temp_CreateTimerQueueTimer)(PHANDLE phNewTimer,
+    HANDLE TimerQueue,
+    WAITORTIMERCALLBACK Callback,
+    PVOID DueTime,
+    DWORD Period,
+    DWORD Flags,
+    ULONG Parameter) = nullptr;
+
+DWORD(WINAPI *temp_SetFilePointer)(HANDLE hFile,
+                                   LONG lDistanceToMove,
+                                   PLONG lpDistanceToMoveHigh,
+                                   DWORD dwMoveMethod) = nullptr;
+
+BOOL(WINAPI *temp_ReadFile)(HANDLE hFile,
+                            LPVOID lpBuffer,
+                            DWORD nNumberOfBytesToRead,
+                            LPDWORD lpNumberOfBytesRead,
+                            LPOVERLAPPED lpOverlapped) = nullptr;
+
+HANDLE(WINAPI *temp_CreateFileW)(LPCWSTR lpFileName,
+                                 DWORD dwDesiredAccess,
+                                 DWORD dwShareMode,
+                                 LPSECURITY_ATTRIBUTES lpSecurityAttributes,
+                                 DWORD dwCreationDisposition,
+                                 DWORD dwFlagsAndAttributes,
+                                 HANDLE hTemplateFile) = nullptr;
+
+DWORD(WINAPI *temp_GetFullPathNameW)(LPCWSTR lpFileName,
+                                     DWORD nBufferLength,
+                                     LPWSTR lpBuffer,
+                                     LPWSTR *lpFilePart) = nullptr;
+
+DWORD(WINAPI *temp_GetFileAttributesW)(LPCWSTR lpFileName) = nullptr;
+
+void (WINAPI *temp_GetSystemTimeAsFileTime)(LPFILETIME lpSystemTimeAsFileTime) = nullptr;
+
+SIZE_T(WINAPI *temp_VirtualQuery)(LPCVOID lpAddress,
+                                  PMEMORY_BASIC_INFORMATION lpBuffer,
+                                  SIZE_T dwLength) = nullptr;
+
+BOOL(WINAPI *temp_ReadProcessMemory)(HANDLE hProcess,
+                                     LPCVOID lpBaseAddress,
+                                     LPVOID lpBuffer,
+                                     SIZE_T nSize,
+                                     SIZE_T *lpNumberOfBytesRead) = nullptr;
+
+/*DECLSPEC_ALLOCATOR*/
+HLOCAL(WINAPI *temp_LocalAlloc)(UINT uFlags,
+                                SIZE_T uBytes) = nullptr;
+
+HLOCAL(WINAPI *temp_LocalFree)(_Frees_ptr_opt_ HLOCAL hMem) = nullptr;
+
+BOOL(WINAPI *temp_GlobalMemoryStatusEx)(LPMEMORYSTATUSEX lpBuffer) = nullptr;
+
+BOOL(WINAPI *temp_WriteProcessMemory)(HANDLE hProcess,
+                                      LPVOID lpBaseAddress,
+                                      LPCVOID lpBuffer,
+                                      SIZE_T nSize,
+                                      SIZE_T *lpNumberOfBytesWritten) = nullptr;
+
+SIZE_T(WINAPI *temp_LocalSize)(HLOCAL hMem) = nullptr;
+
+LPVOID(WINAPI *temp_HeapAlloc)(HANDLE hHeap,
+                               DWORD dwFlags,
+                               SIZE_T dwBytes) = nullptr;
+
+HANDLE(WINAPI *temp_GetProcessHeap)() = nullptr;
+BOOL(WINAPI *temp_HeapFree)(HANDLE hHeap,
+                            DWORD dwFlags,
+                            _Frees_ptr_opt_ LPVOID lpMem) = nullptr;
+
+BOOL(WINAPI *temp_IsBadReadPtr)(const VOID *lp,
+                                UINT_PTR ucb) = nullptr;
+HANDLE(WINAPI *temp_GetCurrentProcess)() = nullptr;
+
+BOOL(WINAPI *temp_GetThreadContext)(HANDLE hThread,
+                                    LPCONTEXT lpContext) = nullptr;
+
+void (WINAPI *temp_Sleep)(DWORD dwMilliseconds) = nullptr;
+
+DWORD(WINAPI *temp_GetCurrentProcessId)() = nullptr;
+
+HANDLE(WINAPI *temp_OpenProcess)(DWORD dwDesiredAccess,
+                                 BOOL bInheritHandle,
+                                 DWORD dwProcessId) = nullptr;
+
+DWORD(WINAPI *temp_GetEnvironmentVariableW)(LPCWSTR lpName,
+    LPWSTR lpBuffer,
+    DWORD nSize) = nullptr;
+
+HANDLE(WINAPI *temp_CreateToolhelp32Snapshot)(DWORD dwFlags,
+    DWORD th32ProcessID) = nullptr;
+
+BOOL(WINAPI *temp_Module32FirstW)(HANDLE hSnapshot,
+                                  LPMODULEENTRY32W lpme) = nullptr;
+
+BOOL(WINAPI *temp_Module32NextW)(HANDLE hSnapshot,
+                                 LPMODULEENTRY32W lpme) = nullptr;
+
+BOOL(WINAPI *temp_SwitchToThread)() = nullptr;
+
+BOOL(WINAPI *temp_IsWow64Process)(HANDLE hProcess,
+                                  PBOOL Wow64Process) = nullptr;
+
+HANDLE(WINAPI *temp_CreateRemoteThread)(HANDLE hProcess,
+                                        LPSECURITY_ATTRIBUTES lpThreadAttributes,
+                                        SIZE_T dwStackSize,
+                                        LPTHREAD_START_ROUTINE lpStartAddress,
+                                        LPVOID lpParameter,
+                                        DWORD dwCreationFlags,
+                                        LPDWORD lpThreadId) = nullptr;
+
+BOOL(WINAPI *temp_Thread32First)(HANDLE hSnapshot,
+                                 LPTHREADENTRY32 lpte) = nullptr;
+
+HANDLE(WINAPI *temp_OpenThread)(DWORD dwDesiredAccess,
+                                BOOL bInheritHandle,
+                                DWORD dwThreadId) = nullptr;
+
+BOOL(WINAPI *temp_Thread32Next)(HANDLE hSnapshot,
+                                LPTHREADENTRY32 lpte) = nullptr;
+
+BOOL(WINAPI *temp_Process32FirstW)(HANDLE hSnapshot,
+                                   LPTHREADENTRY32 lpte) = nullptr;
+
+BOOL(WINAPI *temp_Process32NextW)(HANDLE hSnapshot,
+                                  LPTHREADENTRY32 lpte) = nullptr;
+
+DWORD(WINAPI *temp_GetCurrentThreadId)() = nullptr;
+
+
+BOOL(WINAPI *temp_TerminateProcess)(HANDLE hProcess,
+                                    UINT uExitCode) = nullptr;
+
+
+BOOL(WINAPI *temp_CloseHandle)(HANDLE hObject) = nullptr;
+
+BOOL(WINAPI *temp_DuplicateHandle)(HANDLE hSourceProcessHandle,
+                                   HANDLE hSourceHandle,
+                                   HANDLE hTargetProcessHandle,
+                                   LPHANDLE lpTargetHandle,
+                                   DWORD dwDesiredAccess,
+                                   BOOL bInheritHandle,
+                                   DWORD dwOptions) = nullptr;
+
+
+BOOL(WINAPI *temp_SetHandleInformation)(HANDLE hObject,
+                                        DWORD dwMask,
+                                        DWORD dwFlags) = nullptr;
+
+BOOL(WINAPI *temp_DeviceIoControl)(HANDLE hDevice,
+                                   DWORD dwIoControlCode,
+                                   LPVOID lpInBuffer,
+                                   DWORD nInBufferSize,
+                                   LPVOID lpOutBuffer,
+                                   DWORD nOutBufferSize,
+                                   LPDWORD lpBytesReturned,
+                                   LPOVERLAPPED lpOverlapped) = nullptr;
+
+int (WINAPI *temp_lstrlenW)(LPCWSTR lpString) = nullptr;
+
+int (WINAPI *temp_MultiByteToWideChar)(UINT CodePage,
+                                       DWORD dwFlags,
+                                       _In_NLS_string_(cbMultiByte)LPCCH lpMultiByteStr,
+                                       int cbMultiByte,
+                                       LPWSTR lpWideCharStr,
+                                       int cchWideChar) = nullptr;
+
+HANDLE(WINAPI *temp_CreateTimerQueue)() = nullptr;
+
+BOOL(WINAPI *temp_DeleteTimerQueueEx)(HANDLE TimerQueue,
+                                      HANDLE CompletionEvent) = nullptr;
+
+BOOL(WINAPI *temp_CheckRemoteDebuggerPresent)(HANDLE hProcess,
+    PBOOL pbDebuggerPresent) = nullptr;
+
+LONG(WINAPI *temp_UnhandledExceptionFilter)(_EXCEPTION_POINTERS *ExceptionInfo) = nullptr;
+
+LPTOP_LEVEL_EXCEPTION_FILTER(WINAPI *temp_SetUnhandledExceptionFilter)(
+  LPTOP_LEVEL_EXCEPTION_FILTER lpTopLevelExceptionFilter) = nullptr;
+
+ULONG(WINAPI *temp_RemoveVectoredExceptionHandler)(PVOID Handle) = nullptr;
+
+int (*temp_WSAStartup)(WORD wVersionRequired,
+                       LPWSADATA lpWSAData) = nullptr;
+
+int (*temp_WSACleanup)() = nullptr;
+
+int (*temp_closesocket)(IN SOCKET s) = nullptr;
+
+int (*temp_recv)(SOCKET s,
+                 char *buf,
+                 int len,
+                 int flags) = nullptr;
+
+int (*temp_send)(SOCKET s,
+                 const char *buf,
+                 int len,
+                 int flags) = nullptr;
+
+
+SOCKET(*temp_socket)(int af, int type, int protocol) = nullptr;
+
+int (*temp_connect)(SOCKET s,
+                    const sockaddr *name,
+                    int namelen) = nullptr;
+
+ULONG(*temp_inet_addr)(_In_z_ const char FAR *cp) = nullptr;
+
+u_short(*temp_htons)(u_short hostshort) = nullptr;
+
+int (*temp_WSAGetLastError)() = nullptr;
+
+void (*temp_RtlInitUnicodeString)(PUNICODE_STRING DestinationString,
+                                  PCWSTR SourceString) = nullptr;
+NTSTATUS(*temp_NtClose)(IN HANDLE Handle) = nullptr;
+BOOL(*temp_FreeLibrary)(HMODULE hLibModule
+                       ) = nullptr;
+
+HMODULE(*temp_LoadLibraryAA)(LPCSTR lpLibFileName) = nullptr;
+
+BOOL(*temp_QueryInformationJobObject)(HANDLE             hJob,
+                                      JOBOBJECTINFOCLASS JobObjectInformationClass,
+                                      LPVOID             lpJobObjectInformation,
+                                      DWORD              cbJobObjectInformationLength,
+                                      LPDWORD            lpReturnLength) = nullptr;
+
+DWORD(*temp_K32GetProcessImageFileNameW)(HANDLE hProcess,
+    LPWSTR  lpImageFileName,
+    DWORD  nSize) = nullptr;
+#pragma endregion Pointer Hash Functions
+
+// -----------------
+#pragma region Custom Functions
 HANDLE hash_CreateFileA(
   __in LPCSTR file_name,
   __in DWORD access,
@@ -1360,13 +1933,13 @@ BOOL hash_QueryInformationJobObject(HANDLE             hJob,
                                    JOBOBJECTINFOCLASS,
                                    LPVOID,
                                    DWORD,
-                                   LPDWORD            )>(get_api(_hash, (LPCSTR)PRINT_HIDE_STR("kernel32.dll"),
+                                   LPDWORD)>(get_api(_hash, (LPCSTR)PRINT_HIDE_STR("kernel32.dll"),
                                        strlen(func), STRONG_SEED));
-  return temp_QueryInformationJobObject(            hJob,
-         JobObjectInformationClass,
-         lpJobObjectInformation,
-         cbJobObjectInformationLength,
-         lpReturnLength);
+  return temp_QueryInformationJobObject(hJob,
+                                        JobObjectInformationClass,
+                                        lpJobObjectInformation,
+                                        cbJobObjectInformationLength,
+                                        lpReturnLength);
 }
 
 DWORD hash_K32GetProcessImageFileNameW(HANDLE hProcess,
@@ -1377,7 +1950,7 @@ DWORD hash_K32GetProcessImageFileNameW(HANDLE hProcess,
   const auto _hash = t1ha0(func, strlen(func), STRONG_SEED);
   temp_K32GetProcessImageFileNameW = static_cast<DWORD(*)(HANDLE,
                                      LPWSTR,
-                                     DWORD  )>(get_api(_hash, (LPCSTR)PRINT_HIDE_STR("kernel32.dll"),
+                                     DWORD)>(get_api(_hash, (LPCSTR)PRINT_HIDE_STR("kernel32.dll"),
                                          strlen(func), STRONG_SEED));
   return temp_K32GetProcessImageFileNameW(hProcess,
                                           lpImageFileName,
@@ -1391,3 +1964,4 @@ HANDLE hash_GetCurrentThread()
                           strlen(func), STRONG_SEED));
   return temp_GetCurrentThread();
 }
+#pragma endregion Custom Functions

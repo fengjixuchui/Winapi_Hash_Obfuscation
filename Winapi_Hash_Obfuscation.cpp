@@ -1,9 +1,8 @@
+#include <windows.h>
 #include <iostream>
 
 #include "t1ha/t1ha.h"
-#include <windows.h>
-#include <sysinfoapi.h>
-#include "api_obf/hash_work.hpp"
+#include "api_obf/api_obfuscation.hpp"
 
 int main()
 {

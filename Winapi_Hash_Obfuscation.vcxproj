@@ -151,7 +151,6 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="api_obf\hash_work.cpp" />
     <ClCompile Include="t1ha\src\t1ha0.c" />
     <ClCompile Include="t1ha\src\t1ha0_ia32aes_avx.c" />
     <ClCompile Include="t1ha\src\t1ha0_ia32aes_avx2.c" />
@@ -166,9 +165,8 @@
     <ClCompile Include="Winapi_Hash_Obfuscation.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="api_obf\export_work.hpp" />
-    <ClInclude Include="api_obf\hash_work.hpp" />
-    <ClInclude Include="api_obf\PointerHashFunc.hpp" />
+    <ClInclude Include="api_obf\api_obfuscation.hpp" />
+    <ClInclude Include="hide_str.hpp" />
     <ClInclude Include="t1ha\src\t1ha0_ia32aes_a.h" />
     <ClInclude Include="t1ha\src\t1ha0_ia32aes_b.h" />
     <ClInclude Include="t1ha\src\t1ha_bits.h" />
