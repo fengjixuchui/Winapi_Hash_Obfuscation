@@ -9,7 +9,7 @@
 #include <winternl.h>
 
 #define STRONG_SEED 10376313370251892926
-#define RAND_DWORD1		0x03EC7B5E
+#define RAND_DWORD1	0x03EC7B5E
 #define ROR(x,n) (((x) >> (n)) | ((x) << (32-(n))))
 
 // -----------------
@@ -32,6 +32,7 @@ typedef struct _PEB_LDR_DATA_
 } PEB_LDR_DATA_, * PPEB_LDR_DATA_;
 
 #ifdef _WIN64
+
 typedef struct _PEB_c
 {
   BYTE Reserved1[2];
@@ -39,7 +40,9 @@ typedef struct _PEB_c
   BYTE Reserved2[21];
   PPEB_LDR_DATA_ Ldr;
 } PEB_c;
+
 #else
+
 typedef struct _PEB_c
 {
   /*0x000*/     UINT8        InheritedAddressSpace;
@@ -51,6 +54,7 @@ typedef struct _PEB_c
   /*0x00C*/     struct _PEB_LDR_DATA *Ldr;
   /*.....*/
 } PEB_c;
+
 #endif
 
 #pragma warning (disable : 4996)
@@ -63,6 +67,7 @@ __forceinline const wchar_t *char_to_wchar(const char *c)
 }
 
 static HMODULE(WINAPI *temp_LoadLibraryA)(__in LPCSTR file_name) = nullptr;
+
 static int (*temp_lstrcmpiW)(LPCWSTR lpString1, LPCWSTR lpString2) = nullptr;
 
 static __forceinline HMODULE hash_LoadLibraryA(__in LPCSTR file_name)
@@ -146,7 +151,6 @@ __forceinline LPVOID parse_export_table(HMODULE module, uint64_t api_hash, uint6
   return func_find;
 }
 
-
 __forceinline LPVOID get_api(uint64_t api_hash, LPCSTR module, uint64_t len, const uint64_t seed)
 {
   HMODULE krnl32, hDll;
@@ -192,6 +196,7 @@ __forceinline LPVOID get_api(uint64_t api_hash, LPCSTR module, uint64_t len, con
   api_func = static_cast<LPVOID>(parse_export_table(hDll, api_hash, len, seed));
   return api_func;
 }
+
 #pragma endregion Export Work
 
 // -----------------
