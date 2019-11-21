@@ -7,7 +7,9 @@
 
 int main()
 {
+  // example
   FILETIME fileTime;
   hash_GetSystemTimeAsFileTime(&fileTime);
-  std::cout << "Hello World!\n";
+  // ------------------------------------
+  std::cout << "Check code!\r\n";
 }
